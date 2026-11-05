@@ -75,7 +75,7 @@ def save_outgoing_to_db(reply_id: str, ref_msg_id: str, recipient: str, reply_te
 
 def ask_gemini(user_query: str) -> str:
     """Send question to Gemini and get a clean text response under 160 characters for SMS."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1-5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     
     prompt = (
         "You are an emergency disaster SMS assistant. Answer the user query directly, concisely, and factually. "
