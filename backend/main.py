@@ -198,16 +198,30 @@ def call_groq(prompt: str, system: str = None, max_tokens: int = 150) -> str:
 def send_sms_via_gateway(recipient: str, message: str) -> bool:
     """Dispatches outbound SMS back to recipient via SMS-Gate API."""
     auth = (GATEWAY_USERNAME, GATEWAY_PASSWORD)
+    
+    # Ensure text is not empty or pure whitespace
+    body_text = str(message).strip() if message else ""
+    if not body_text:
+        body_text = "ResQ-Net: Emergency assistance acknowledged. Stay safe."
+
     payload = {
         "deviceId": DEVICE_ID,
-        "phoneNumbers": [recipient],
+        "phoneNumbers": [str(recipient).strip()],
         "textMessage": {
-            "text": message
+            "text": body_text,
+            "Text": body_text
         }
     }
+    
     try:
-        log(f"[GATEWAY] Sending outbound SMS to {recipient}...")
-        response = requests.post(GATEWAY_API_URL, json=payload, auth=auth, timeout=12)
+        log(f"[GATEWAY] Sending outbound SMS to {recipient} ({len(body_text)} chars)...")
+        response = requests.post(
+            GATEWAY_API_URL, 
+            json=payload, 
+            auth=auth, 
+            headers={"Content-Type": "application/json"},
+            timeout=12
+        )
         if response.status_code in (200, 201, 202):
             log(f"[SMS DISPATCHED] Response delivered to {recipient}")
             return True
