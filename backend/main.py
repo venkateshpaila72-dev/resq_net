@@ -1,5 +1,4 @@
 import os
-import csv
 import re
 import uuid
 from datetime import datetime, timezone
@@ -30,14 +29,6 @@ DEVICE_ID = os.getenv("DEVICE_ID", "2x9j6oWbTb46UJwgX1_KA")
 GATEWAY_API_URL = "https://api.sms-gate.app/3rdparty/v1/messages"
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 
-# Active Groq models list (avoids reasoning-only token-burn models)
-GROQ_MODELS = [
-    GROQ_MODEL,
-    "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant",
-    "mixtral-8x7b-32768"
-]
-
 # Initialize official Groq client
 groq_client = None
 if GROQ_API_KEY:
@@ -50,7 +41,7 @@ else:
     log("[!] Warning: GROQ_API_KEY is not defined in .env.")
 
 # ----------------- FastAPI & CORS -----------------
-app = FastAPI(title="ResQ-Net SMS & Groq AI Gateway")
+app = FastAPI(title="ResQ-Net SMS & Groq Gateway")
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,22 +63,9 @@ try:
     outgoing_col = db["outgoing_replies"]
     log("[*] MongoDB successfully connected and ready.")
 except Exception as e:
-    log(f"[!] Warning: MongoDB connection failed: {e}. Falling back to CSV only.")
+    log(f"[!] Warning: MongoDB connection failed: {e}")
     incoming_col = None
     outgoing_col = None
-
-# ----------------- CSV Fallback Persistence -----------------
-INCOMING_CSV = "incoming_sms.csv"
-REPLIES_CSV = "outgoing_replies.csv"
-
-for filename, headers in [
-    (INCOMING_CSV, ["Message_ID", "Timestamp", "Sender", "Query"]),
-    (REPLIES_CSV, ["Reply_ID", "Reference_Message_ID", "Timestamp", "Recipient", "Reply_Text", "Status"])
-]:
-    if not os.path.exists(filename):
-        with open(filename, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(headers)
 
 
 # ----------------- Helper Functions -----------------
@@ -97,18 +75,13 @@ def is_valid_mobile_number(number: str) -> bool:
     return clean.isdigit() and len(clean) >= 7
 
 
-def save_incoming(msg_id: str, timestamp: str, sender: str, query: str):
-    """Stores incoming record to both CSV and MongoDB."""
-    with open(INCOMING_CSV, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow([msg_id, timestamp, sender, query])
-
+def save_incoming(msg_id: str, sender: str, query: str):
+    """Stores incoming record to MongoDB."""
     if incoming_col is not None:
         try:
             incoming_col.insert_one({
                 "_id": msg_id,
                 "message_id": msg_id,
-                "timestamp": timestamp,
                 "sender": sender,
                 "query": query,
                 "created_at": datetime.now(timezone.utc)
@@ -118,19 +91,14 @@ def save_incoming(msg_id: str, timestamp: str, sender: str, query: str):
             log(f"[DB ERROR] Failed to save incoming message: {pe}")
 
 
-def save_outgoing(reply_id: str, ref_msg_id: str, timestamp: str, recipient: str, reply_text: str, status: str):
-    """Stores outgoing reply record to both CSV and MongoDB."""
-    with open(REPLIES_CSV, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow([reply_id, ref_msg_id, timestamp, recipient, reply_text, status])
-
+def save_outgoing(reply_id: str, ref_msg_id: str, recipient: str, reply_text: str, status: str):
+    """Stores outgoing reply record to MongoDB."""
     if outgoing_col is not None:
         try:
             outgoing_col.insert_one({
                 "_id": reply_id,
                 "reply_id": reply_id,
                 "reference_message_id": ref_msg_id,
-                "timestamp": timestamp,
                 "recipient": recipient,
                 "reply_text": reply_text,
                 "status": status,
@@ -141,94 +109,63 @@ def save_outgoing(reply_id: str, ref_msg_id: str, timestamp: str, recipient: str
             log(f"[DB ERROR] Failed to save outgoing reply: {pe}")
 
 
-def get_emergency_failsafe(query: str) -> str:
-    """Deterministic local first-aid protocol when external API is unreachable."""
-    q = query.lower()
-    if any(k in q for k in ["gas", "leak", "chemical", "styrene", "fumes"]):
-        return "ResQ-Net Gas Alert: Evacuate upwind/crosswind! Cover nose with wet cloth. Move 3-5km toward NH16/high ground. Avoid basements and low areas."
-    if any(k in q for k in ["fire", "smoke", "flame", "burning"]):
-        return "ResQ-Net: Evacuate immediately! Crawl low under smoke. Feel doors before opening. Once out, stay out and call 101/112."
-    if any(k in q for k in ["burn", "blister", "cracker"]):
-        return "ResQ-Net: Cool burn under running water 10-20 mins. Do not use ice, paste, or oil. Cover with clean cloth. Seek medical aid."
-    if any(k in q for k in ["bleed", "cut", "wound"]):
-        return "ResQ-Net: Apply firm, direct pressure with clean cloth. Elevate wound above heart level. Do not remove soaked cloth, add more on top."
-    if any(k in q for k in ["flood", "drown", "water rising"]):
-        return "ResQ-Net: Move to higher floor or solid ground. Disconnect main power grid. Avoid walking or driving in floodwaters."
-    if any(k in q for k in ["fracture", "broken bone"]):
-        return "ResQ-Net: Immobilize injured limb. Do not try to realign bone. Apply cold pack wrapped in cloth. Seek medical transport."
-
-    return "ResQ-Net: Emergency assistance acknowledged. Stay in a safe, elevated location. Conserve battery. Help is being notified."
-
-
-def call_groq(prompt: str, system: str = None, max_tokens: int = 250) -> str:
-    """Call Groq API using the official Groq client with multi-model fallback."""
+def call_groq(prompt: str) -> str:
+    """Sends prompt directly to Groq model without fallback strings."""
     if groq_client is None:
-        log("[AI PIPELINE] Groq client unavailable. Using local failsafe.")
-        return get_emergency_failsafe(prompt)
+        log("[AI ERROR] Groq client not initialized.")
+        return ""
 
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    system_instruction = (
+        "hey your are an helpul assistant . helper in emergence and if the situation is seveare then give the respected rescuse centers . each response should be points ."
+    )
 
-    # Deduplicate while preserving model fallback priority
-    seen = set()
-    models_to_try = [m for m in GROQ_MODELS if m and not (m in seen or seen.add(m))]
+    messages = [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": prompt}
+    ]
 
-    for model_name in models_to_try:
-        try:
-            log(f"[AI PIPELINE] Querying Groq model '{model_name}' with: '{prompt}'")
-            response = groq_client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=0.2
-            )
-            
-            message_obj = response.choices[0].message
-            # Extract content or fallback to reasoning field if present
-            raw_text = message_obj.content or getattr(message_obj, "reasoning", "") or ""
-            raw_text = raw_text.strip()
+    try:
+        log(f"[AI PIPELINE] Querying Groq model '{GROQ_MODEL}' with: '{prompt}'")
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages,
+            max_tokens=250,
+            temperature=0.2
+        )
 
-            if not raw_text:
-                log(f"[AI WARNING] Model '{model_name}' returned empty content (finish_reason: {response.choices[0].finish_reason}). Trying next model...")
-                continue
+        message_obj = response.choices[0].message
+        raw_text = message_obj.content or getattr(message_obj, "reasoning", "") or ""
+        clean_text = raw_text.replace("*", "").replace("#", "").strip()
+        log(f"[AI SUCCESS] Groq replied: {clean_text}")
+        return clean_text[:160]
 
-            clean_text = raw_text.replace("*", "").replace("#", "").strip()
-            log(f"[AI SUCCESS] Groq model '{model_name}' replied: {clean_text}")
-            return clean_text[:160]
-
-        except Exception as exc:
-            log(f"[AI WARNING] Groq model '{model_name}' failed: {exc}")
-            continue
-
-    log("[AI FAILED] All Groq models failed. Using local rule engine.")
-    return get_emergency_failsafe(prompt)
+    except Exception as exc:
+        log(f"[AI ERROR] Groq call failed: {exc}")
+        return ""
 
 
 def send_sms_via_gateway(recipient: str, message: str) -> bool:
-    """Dispatches outbound SMS back to recipient via SMS-Gate API with verified textMessage structure."""
-    auth = (GATEWAY_USERNAME, GATEWAY_PASSWORD)
-    
-    body_text = str(message).strip() if message else ""
-    if not body_text:
-        body_text = "ResQ-Net: Emergency assistance acknowledged. Stay safe."
+    """Dispatches outbound SMS back to recipient via SMS-Gate API."""
+    if not message:
+        log("[GATEWAY ERROR] Empty message received. Skipping SMS dispatch.")
+        return False
 
+    auth = (GATEWAY_USERNAME, GATEWAY_PASSWORD)
     payload = {
         "deviceId": DEVICE_ID,
         "phoneNumbers": [str(recipient).strip()],
         "textMessage": {
-            "text": body_text,
-            "Text": body_text
+            "text": message,
+            "Text": message
         }
     }
-    
+
     try:
-        log(f"[GATEWAY] Sending outbound SMS to {recipient} ({len(body_text)} chars)...")
+        log(f"[GATEWAY] Sending outbound SMS to {recipient} ({len(message)} chars)...")
         response = requests.post(
-            GATEWAY_API_URL, 
-            json=payload, 
-            auth=auth, 
+            GATEWAY_API_URL,
+            json=payload,
+            auth=auth,
             headers={"Content-Type": "application/json"},
             timeout=12
         )
@@ -243,36 +180,24 @@ def send_sms_via_gateway(recipient: str, message: str) -> bool:
         return False
 
 
-def process_query_in_background(message_id: str, sender: str, raw_text: str):
-    """Background task: Parse -> Query Groq -> Send SMS -> Save logs to MongoDB."""
+def process_query_in_background(message_id: str, sender: str, prompt: str):
+    """Background task: Calls Groq directly, sends SMS, and saves to MongoDB."""
     try:
-        # Strip keyword 'ENET' (case-insensitive)
-        clean_prompt = re.sub(r"^ENET\s*", "", raw_text, flags=re.IGNORECASE).strip()
-        if not clean_prompt:
-            clean_prompt = "Emergency assistance needed"
-
         log(f"\n==========================================")
-        log(f"[PIPELINE START] ID: {message_id} | Sender: {sender} | Prompt: '{clean_prompt}'")
+        log(f"[PIPELINE START] ID: {message_id} | Sender: {sender} | Prompt: '{prompt}'")
 
-        system_instruction = (
-            "You are an emergency disaster evacuation and first-aid assistant. "
-            "Provide critical directions, safety actions, and clear instructions concisely. "
-            "Strictly NO markdown, bold text, asterisks, bullet points, or emojis. "
-            "Keep the entire answer strictly under 150 characters for a single cellular SMS."
-        )
+        # 1. Ask Groq
+        ai_answer = call_groq(prompt)
 
-        # 1. Ask Groq (max_tokens=250 allows full reasoning and completion)
-        ai_answer = call_groq(clean_prompt, system=system_instruction, max_tokens=250)
-        log(f"[GROQ RESPONSE READY]: {ai_answer}")
-
-        # 2. Dispatch SMS back to sender
+        # 2. Dispatch SMS
         reply_id = f"REP_{uuid.uuid4().hex[:8].upper()}"
-        sms_sent = send_sms_via_gateway(sender, ai_answer)
+        sms_sent = False
+        if ai_answer:
+            sms_sent = send_sms_via_gateway(sender, ai_answer)
         status_label = "SENT" if sms_sent else "FAILED"
 
-        # 3. Log to MongoDB and CSV
-        reply_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        save_outgoing(reply_id, message_id, reply_timestamp, sender, ai_answer, status_label)
+        # 3. Log to MongoDB
+        save_outgoing(reply_id, message_id, sender, ai_answer, status_label)
         log(f"[PIPELINE COMPLETE] Task {message_id} finished with status: {status_label}")
         log(f"==========================================\n")
     except Exception as err:
@@ -318,26 +243,27 @@ async def receive_sms_webhook(request: Request, background_tasks: BackgroundTask
         sender = form.get("From") or form.get("from") or "Unknown"
 
     cleaned_query = str(raw_query).strip()
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # Filter out telecommunication carrier notices
     if not is_valid_mobile_number(sender):
         log(f"[SKIPPED AUTO-REPLY] Sender '{sender}' is not a mobile number.")
         return {"status": "saved", "note": "Operator message ignored"}
 
-    # Save all incoming messages for audit trail
+    # STRICT CHECK: Message MUST start with ENET (case-insensitive)
+    if not re.match(r"^ENET\b", cleaned_query, flags=re.IGNORECASE):
+        log(f"[SKIPPED] Message does not start with 'ENET': '{cleaned_query}'")
+        return {"status": "ignored", "reason": "Message does not start with ENET"}
+
+    # Strip the leading ENET keyword
+    clean_prompt = re.sub(r"^ENET\s*", "", cleaned_query, flags=re.IGNORECASE).strip()
+
+    # Save to MongoDB
     message_id = f"MSG_{uuid.uuid4().hex[:8].upper()}"
-    save_incoming(message_id, timestamp, sender, cleaned_query)
-    log(f"\n[{message_id}] Received from: {sender} | Raw Query: {cleaned_query}")
+    save_incoming(message_id, sender, cleaned_query)
+    log(f"\n[{message_id}] Received from: {sender} | Prompt: {clean_prompt}")
 
-    # CHECK FOR 'ENET' KEYWORD
-    # Only process queries that start with or contain the keyword ENET
-    if not re.search(r"\bENET\b", cleaned_query, flags=re.IGNORECASE):
-        log(f"[SKIPPED AI PIPELINE] Message does not contain 'ENET' keyword. No auto-reply triggered.")
-        return {"status": "saved", "note": "Keyword ENET not found in message"}
-
-    # Process Groq query and dispatch SMS asynchronously
-    background_tasks.add_task(process_query_in_background, message_id, sender, cleaned_query)
+    # Offload query & SMS dispatch to background task
+    background_tasks.add_task(process_query_in_background, message_id, sender, clean_prompt)
 
     return {"status": "accepted", "message_id": message_id}
 
@@ -351,18 +277,17 @@ class BroadcastRequest(BaseModel):
 async def send_manual_broadcast(item: BroadcastRequest):
     """Allows manual SMS dispatch directly from the dashboard."""
     reply_id = f"REP_{uuid.uuid4().hex[:8].upper()}"
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     success = send_sms_via_gateway(item.recipient, item.message)
     status_label = "SENT" if success else "FAILED"
 
-    save_outgoing(reply_id, "MANUAL_BROADCAST", timestamp, item.recipient, item.message, status_label)
+    save_outgoing(reply_id, "MANUAL_BROADCAST", item.recipient, item.message, status_label)
     return {"status": status_label, "reply_id": reply_id}
 
 
 @app.get("/api/messages")
 async def get_all_messages():
-    """Returns recent messages from MongoDB (with automatic CSV fallback)."""
+    """Returns recent messages directly from MongoDB."""
     if incoming_col is not None and outgoing_col is not None:
         try:
             incoming = list(incoming_col.find().sort("created_at", -1).limit(50))
@@ -379,43 +304,9 @@ async def get_all_messages():
                 "outgoing": outgoing
             }
         except Exception as e:
-            log(f"[MONGODB READ ERROR] {e}. Falling back to CSV.")
+            log(f"[MONGODB READ ERROR] {e}")
 
-    # CSV Fallback
-    inc_list = []
-    out_list = []
-
-    if os.path.exists(INCOMING_CSV):
-        with open(INCOMING_CSV, "r", encoding="utf-8") as f:
-            inc_list = list(csv.DictReader(f))[::-1][:50]
-
-    if os.path.exists(REPLIES_CSV):
-        with open(REPLIES_CSV, "r", encoding="utf-8") as f:
-            out_list = list(csv.DictReader(f))[::-1][:50]
-
-    return {
-        "source": "csv_fallback",
-        "incoming": [
-            {
-                "_id": r.get("Message_ID", ""),
-                "message_id": r.get("Message_ID", ""),
-                "timestamp": r.get("Timestamp", ""),
-                "sender": r.get("Sender", ""),
-                "query": r.get("Query", "")
-            } for r in inc_list
-        ],
-        "outgoing": [
-            {
-                "_id": r.get("Reply_ID", ""),
-                "reply_id": r.get("Reply_ID", ""),
-                "reference_message_id": r.get("Reference_Message_ID", ""),
-                "timestamp": r.get("Timestamp", ""),
-                "recipient": r.get("Recipient", ""),
-                "reply_text": r.get("Reply_Text", ""),
-                "status": r.get("Status", "UNKNOWN")
-            } for r in out_list
-        ]
-    }
+    return {"source": "none", "incoming": [], "outgoing": []}
 
 
 if __name__ == "__main__":
