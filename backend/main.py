@@ -116,7 +116,7 @@ def call_groq(prompt: str) -> str:
         return ""
 
     system_instruction = (
-        "just give the response in bullet points. dont just start with we need to like that and also dont mention anything like buuletpoints heading like .just the matter directly "
+        "You are an emergency response and disaster management assistant. Answer the user's specific scenario with direct, practical, and highly relevant guidance. Address all specific details requested in the query—such as evacuation directions, safety radii, and designated safe zones—without generic generalities. Do not include introductory phrases, conversational filler, concluding remarks, or headings. Present the response strictly as clear, actionable points, ensuring each point is accurate, concise, and focused entirely on life safety."
     )
 
     messages = [
