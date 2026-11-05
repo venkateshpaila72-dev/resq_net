@@ -112,40 +112,32 @@ def save_outgoing(reply_id: str, ref_msg_id: str, recipient: str, reply_text: st
 def call_groq(prompt: str) -> str:
     """Sends prompt directly to Groq model without fallback strings."""
     if groq_client is None:
-        log("[AI PIPELINE] Groq client unavailable. Using local failsafe.")
-        return get_emergency_failsafe(prompt)
+        log("[AI ERROR] Groq client not initialized.")
+        return ""
 
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    system_instruction = (
+        "hey your are an helpul assistant . helper in emergence and if the situation is seveare then give the respected rescuse centers . each response should be points ."
+    )
 
-    # Deduplicate while preserving model fallback priority
-    seen = set()
-    models_to_try = [m for m in GROQ_MODELS if m and not (m in seen or seen.add(m))]
+    messages = [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": prompt}
+    ]
 
-    for model_name in models_to_try:
-        try:
-            log(f"[AI PIPELINE] Querying Groq model '{model_name}' with: '{prompt}'")
-            response = groq_client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=0.2
-            )
-            
-            message_obj = response.choices[0].message
-            # Extract content or fallback to reasoning field if present
-            raw_text = message_obj.content or getattr(message_obj, "reasoning", "") or ""
-            raw_text = raw_text.strip()
+    try:
+        log(f"[AI PIPELINE] Querying Groq model '{GROQ_MODEL}' with: '{prompt}'")
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages,
+            max_tokens=250,
+            temperature=0.2
+        )
 
-            if not raw_text:
-                log(f"[AI WARNING] Model '{model_name}' returned empty content (finish_reason: {response.choices[0].finish_reason}). Trying next model...")
-                continue
-
-            clean_text = raw_text.replace("*", "").replace("#", "").strip()
-            log(f"[AI SUCCESS] Groq model '{model_name}' replied: {clean_text}")
-            return clean_text[:160]
+        message_obj = response.choices[0].message
+        raw_text = message_obj.content or getattr(message_obj, "reasoning", "") or ""
+        clean_text = raw_text.replace("*", "").replace("#", "").strip()
+        log(f"[AI SUCCESS] Groq replied: {clean_text}")
+        return clean_text[:160]
 
     except Exception as exc:
         log(f"[AI ERROR] Groq call failed: {exc}")
