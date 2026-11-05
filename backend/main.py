@@ -12,13 +12,14 @@ from pydantic import BaseModel
 import uvicorn
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
+from openai import OpenAI
 
 # ----------------- Environment Setup -----------------
 env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
 def log(msg: str):
-    """Ensure instant console output in terminals and cloud logs."""
+    """Ensure instant console output in terminals and Render logs."""
     print(msg, flush=True)
 
 GROK_API_KEY = os.getenv("GROK_API_KEY", "").strip().strip("'").strip('"')
@@ -28,20 +29,22 @@ DEVICE_ID = os.getenv("DEVICE_ID", "2x9j6oWbTb46UJwgX1_KA")
 GATEWAY_API_URL = "https://api.sms-gate.app/3rdparty/v1/messages"
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 
-# Grok (xAI) API Configuration
-GROK_API_URL = "https://api.x.ai/v1/chat/completions"
-# Sequential fallback list of Grok models
-GROK_MODELS = [
-    "grok-2-mini",
-    "grok-2",
-    "grok-beta",
-    "grok-4-1-fast-reasoning"
-]
+# Active Grok models (waterfall fallback)
+GROK_MODELS = ["grok-2-mini", "grok-2", "grok-beta"]
 
+# Initialize xAI Client using official OpenAI compatible interface
+grok_client = None
 if GROK_API_KEY:
-    log("[*] Grok (xAI) API key detected.")
+    try:
+        grok_client = OpenAI(
+            api_key=GROK_API_KEY,
+            base_url="https://api.x.ai/v1"
+        )
+        log("[*] xAI Grok Client initialized successfully.")
+    except Exception as e:
+        log(f"[!] Warning: Failed to initialize Grok client: {e}")
 else:
-    log("[!] Warning: GROK_API_KEY is missing from environment or .env.")
+    log("[!] Warning: GROK_API_KEY is not defined in .env.")
 
 # ----------------- FastAPI & CORS -----------------
 app = FastAPI(title="ResQ-Net SMS & Grok AI Gateway")
@@ -70,7 +73,7 @@ except Exception as e:
     incoming_col = None
     outgoing_col = None
 
-# ----------------- CSV Fallback Persistence -----------------
+# ----------------- CSV Persistence Fallback -----------------
 INCOMING_CSV = "incoming_sms.csv"
 REPLIES_CSV = "outgoing_replies.csv"
 
@@ -86,13 +89,13 @@ for filename, headers in [
 
 # ----------------- Helper Functions -----------------
 def is_valid_mobile_number(number: str) -> bool:
-    """Filter out carrier and service notifications like AA-AIRTEL-S."""
+    """Filter out non-numeric service/operator IDs like AA-AIRTEL-S."""
     clean = re.sub(r"[\s\-\(\)\+]", "", str(number))
     return clean.isdigit() and len(clean) >= 7
 
 
 def save_incoming(msg_id: str, timestamp: str, sender: str, query: str):
-    """Saves incoming SMS to both CSV and MongoDB."""
+    """Stores incoming record to both CSV and MongoDB."""
     with open(INCOMING_CSV, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([msg_id, timestamp, sender, query])
@@ -113,7 +116,7 @@ def save_incoming(msg_id: str, timestamp: str, sender: str, query: str):
 
 
 def save_outgoing(reply_id: str, ref_msg_id: str, timestamp: str, recipient: str, reply_text: str, status: str):
-    """Saves outgoing SMS reply to both CSV and MongoDB."""
+    """Stores outgoing reply record to both CSV and MongoDB."""
     with open(REPLIES_CSV, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([reply_id, ref_msg_id, timestamp, recipient, reply_text, status])
@@ -136,7 +139,7 @@ def save_outgoing(reply_id: str, ref_msg_id: str, timestamp: str, recipient: str
 
 
 def get_emergency_failsafe(query: str) -> str:
-    """Deterministic local first-aid engine if external API is down or key is invalid."""
+    """Local first-aid protocol when network or external API is down."""
     q = query.lower()
     if any(k in q for k in ["fire", "smoke", "flame", "burning"]):
         return "ResQ-Net: Evacuate immediately! Crawl low under smoke. Feel doors before opening. Once out, call 101/112."
@@ -153,52 +156,40 @@ def get_emergency_failsafe(query: str) -> str:
 
 
 def ask_grok(user_prompt: str) -> str:
-    """Calls xAI Grok API to generate an emergency SMS reply."""
-    if not GROK_API_KEY:
-        log("[AI PIPELINE] GROK_API_KEY missing. Using failsafe.")
+    """Queries Grok through the OpenAI SDK interface."""
+    if grok_client is None:
+        log("[AI PIPELINE] Grok client unavailable. Using local failsafe.")
         return get_emergency_failsafe(user_prompt)
 
     system_instruction = (
-        "You are an offline emergency disaster SMS assistant. Answer the user query directly, concisely, and factually. "
-        "Do NOT use markdown formatting, bold text, asterisks, bullet points, or emojis. "
+        "You are an emergency disaster SMS assistant. Answer directly, concisely, and factually. "
+        "Do NOT use markdown, bold text, asterisks, bullet points, or emojis. "
         "Keep the entire response under 150 characters so it fits in a single cellular SMS."
     )
-
-    headers = {
-        "Authorization": f"Bearer {GROK_API_KEY}",
-        "Content-Type": "application/json"
-    }
 
     for model in GROK_MODELS:
         try:
             log(f"[AI PIPELINE] Querying Grok model '{model}' with: '{user_prompt}'")
-            payload = {
-                "model": model,
-                "messages": [
+            completion = grok_client.chat.completions.create(
+                model=model,
+                messages=[
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": user_prompt}
                 ],
-                "temperature": 0.2,
-                "max_tokens": 80
-            }
+                max_tokens=80,
+                temperature=0.2
+            )
 
-            res = requests.post(GROK_API_URL, headers=headers, json=payload, timeout=12)
-
-            if res.status_code == 200:
-                data = res.json()
-                raw_text = data["choices"][0]["message"]["content"]
-                clean_text = raw_text.replace("*", "").replace("#", "").strip()
-                log(f"[AI SUCCESS] Grok model '{model}' generated response: {clean_text}")
-                return clean_text[:160]
-            else:
-                log(f"[AI HTTP ERROR] Grok '{model}' returned HTTP {res.status_code}: {res.text}")
-                continue
+            raw_text = completion.choices[0].message.content
+            clean_text = raw_text.replace("*", "").replace("#", "").strip()
+            log(f"[AI SUCCESS] Grok model '{model}' answered: {clean_text}")
+            return clean_text[:160]
 
         except Exception as exc:
-            log(f"[AI EXCEPTION] Error calling Grok model '{model}': {exc}")
+            log(f"[AI WARNING] Grok model '{model}' failed: {exc}")
             continue
 
-    log("[AI FAILED] All Grok models failed. Using local rule engine.")
+    log("[AI FAILED] All Grok models failed. Using local emergency rule engine.")
     return get_emergency_failsafe(user_prompt)
 
 
@@ -225,7 +216,7 @@ def send_sms_via_gateway(recipient: str, message: str) -> bool:
 
 
 def process_query_in_background(message_id: str, sender: str, raw_text: str):
-    """Background worker: cleans prompt -> queries Grok -> dispatches SMS -> saves to MongoDB."""
+    """Background task: Parse -> Query Grok -> Send SMS -> Save logs."""
     try:
         clean_prompt = raw_text
         if clean_prompt.upper().startswith("ENET"):
@@ -239,14 +230,14 @@ def process_query_in_background(message_id: str, sender: str, raw_text: str):
 
         # 1. Ask Grok
         ai_answer = ask_grok(clean_prompt)
-        log(f"[AI RESPONSE READY]: {ai_answer}")
+        log(f"[GROK RESPONSE READY]: {ai_answer}")
 
         # 2. Dispatch SMS
         reply_id = f"REP_{uuid.uuid4().hex[:8].upper()}"
         sms_sent = send_sms_via_gateway(sender, ai_answer)
         status_label = "SENT" if sms_sent else "FAILED"
 
-        # 3. Log to MongoDB and CSV
+        # 3. Save outgoing record to MongoDB & CSV
         reply_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         save_outgoing(reply_id, message_id, reply_timestamp, sender, ai_answer, status_label)
         log(f"[PIPELINE COMPLETE] Task {message_id} finished with status: {status_label}")
@@ -263,7 +254,7 @@ async def root():
         "service": "ResQ-Net SMS & Grok AI Gateway",
         "status": "online",
         "mongo_connected": incoming_col is not None,
-        "grok_ready": bool(GROK_API_KEY)
+        "grok_client_ready": grok_client is not None
     }
 
 
@@ -301,12 +292,12 @@ async def receive_sms_webhook(request: Request, background_tasks: BackgroundTask
         log(f"[SKIPPED AUTO-REPLY] Sender '{sender}' is not a mobile number.")
         return {"status": "saved", "note": "Operator message ignored"}
 
-    # Save incoming record
+    # Save incoming record to MongoDB & CSV
     message_id = f"MSG_{uuid.uuid4().hex[:8].upper()}"
     save_incoming(message_id, timestamp, sender, cleaned_query)
     log(f"\n[{message_id}] Received from: {sender} | Query: {cleaned_query}")
 
-    # Offload Grok query & SMS dispatch to background task
+    # Process Grok query and dispatch SMS asynchronously
     background_tasks.add_task(process_query_in_background, message_id, sender, cleaned_query)
 
     return {"status": "accepted", "message_id": message_id}
