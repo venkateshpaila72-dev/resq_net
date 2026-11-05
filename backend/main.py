@@ -137,7 +137,7 @@ def call_groq(prompt: str) -> str:
         raw_text = message_obj.content or getattr(message_obj, "reasoning", "") or ""
         clean_text = raw_text.replace("*", "").replace("#", "").strip()
         log(f"[AI SUCCESS] Groq replied: {clean_text}")
-        return clean_text[:160]
+        return clean_text[]
 
     except Exception as exc:
         log(f"[AI ERROR] Groq call failed: {exc}")
