@@ -1,4 +1,5 @@
 import os
+import csv
 import re
 import uuid
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
 def log(msg: str):
-    """Ensure instant console output in terminals and Render logs."""
+    """Ensure instant console output in terminals and cloud logs."""
     print(msg, flush=True)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip().strip("'").strip('"')
@@ -28,6 +29,10 @@ GATEWAY_PASSWORD = os.getenv("GATEWAY_PASSWORD", "6zj_aqgr_wthfy")
 DEVICE_ID = os.getenv("DEVICE_ID", "2x9j6oWbTb46UJwgX1_KA")
 GATEWAY_API_URL = "https://api.sms-gate.app/3rdparty/v1/messages"
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+
+# CSV Fallback Files
+INCOMING_CSV = "incoming_sms.csv"
+REPLIES_CSV = "outgoing_replies.csv"
 
 # Initialize official Groq client
 groq_client = None
@@ -63,7 +68,7 @@ try:
     outgoing_col = db["outgoing_replies"]
     log("[*] MongoDB successfully connected and ready.")
 except Exception as e:
-    log(f"[!] Warning: MongoDB connection failed: {e}")
+    log(f"[!] Warning: MongoDB connection failed: {e}. Falling back to CSV only.")
     incoming_col = None
     outgoing_col = None
 
@@ -76,7 +81,13 @@ def is_valid_mobile_number(number: str) -> bool:
 
 
 def save_incoming(msg_id: str, sender: str, query: str):
-    """Stores incoming record to MongoDB."""
+    """Stores incoming record to MongoDB and CSV backup."""
+    # CSV Backup
+    with open(INCOMING_CSV, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([msg_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), sender, query])
+
+    # MongoDB
     if incoming_col is not None:
         try:
             incoming_col.insert_one({
@@ -84,6 +95,7 @@ def save_incoming(msg_id: str, sender: str, query: str):
                 "message_id": msg_id,
                 "sender": sender,
                 "query": query,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "created_at": datetime.now(timezone.utc)
             })
             log(f"[DB] Inserted incoming message: {msg_id}")
@@ -92,7 +104,13 @@ def save_incoming(msg_id: str, sender: str, query: str):
 
 
 def save_outgoing(reply_id: str, ref_msg_id: str, recipient: str, reply_text: str, status: str):
-    """Stores outgoing reply record to MongoDB."""
+    """Stores outgoing reply record to MongoDB and CSV backup."""
+    # CSV Backup
+    with open(REPLIES_CSV, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([reply_id, ref_msg_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), recipient, reply_text, status])
+
+    # MongoDB
     if outgoing_col is not None:
         try:
             outgoing_col.insert_one({
@@ -102,6 +120,7 @@ def save_outgoing(reply_id: str, ref_msg_id: str, recipient: str, reply_text: st
                 "recipient": recipient,
                 "reply_text": reply_text,
                 "status": status,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "created_at": datetime.now(timezone.utc)
             })
             log(f"[DB] Inserted outgoing reply: {reply_id}")
@@ -110,13 +129,16 @@ def save_outgoing(reply_id: str, ref_msg_id: str, recipient: str, reply_text: st
 
 
 def call_groq(prompt: str) -> str:
-    """Sends prompt directly to Groq model without fallback strings."""
+    """Sends prompt directly to Groq model without hardcoded fallbacks."""
     if groq_client is None:
         log("[AI ERROR] Groq client not initialized.")
         return ""
 
     system_instruction = (
-        "hey your are an helpul assistant . helper in emergence and if the situation is seveare then give the respected rescuse centers . each response should be points ."
+        "You are an emergency disaster response and evacuation specialist. "
+        "Answer the query directly, factually, and concisely in clear actionable bullet points starting with '- '. "
+        "Do not include introductory words, conversational filler, headings, or emojis. "
+        "If severe, provide designated rescue locations and hospital directions."
     )
 
     messages = [
@@ -129,7 +151,7 @@ def call_groq(prompt: str) -> str:
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=messages,
-            max_tokens=250,
+            max_tokens=300,
             temperature=0.2
         )
 
@@ -287,26 +309,85 @@ async def send_manual_broadcast(item: BroadcastRequest):
 
 @app.get("/api/messages")
 async def get_all_messages():
-    """Returns recent messages directly from MongoDB."""
+    """Returns ALL records from MongoDB without pagination/limits."""
     if incoming_col is not None and outgoing_col is not None:
         try:
-            incoming = list(incoming_col.find().sort("created_at", -1).limit(50))
-            outgoing = list(outgoing_col.find().sort("created_at", -1).limit(50))
+            # Query all documents, sorted newest first (no .limit)
+            raw_incoming = list(incoming_col.find().sort("created_at", -1))
+            raw_outgoing = list(outgoing_col.find().sort("created_at", -1))
 
-            for doc in incoming + outgoing:
-                doc["_id"] = str(doc["_id"])
-                if "created_at" in doc and doc["created_at"]:
-                    doc["created_at"] = doc["created_at"].isoformat()
+            formatted_incoming = []
+            for doc in raw_incoming:
+                formatted_incoming.append({
+                    "_id": str(doc.get("_id", "")),
+                    "message_id": doc.get("message_id", str(doc.get("_id", ""))),
+                    "sender": doc.get("sender") or doc.get("from") or doc.get("phone_number") or "Unknown",
+                    "query": doc.get("query") or doc.get("message") or doc.get("text") or doc.get("body") or "",
+                    "timestamp": doc.get("timestamp") or (doc.get("created_at").isoformat() if doc.get("created_at") else ""),
+                    "location": doc.get("location", "Unspecified"),
+                    "exact_gps": doc.get("exact_gps", None)
+                })
+
+            formatted_outgoing = []
+            for doc in raw_outgoing:
+                formatted_outgoing.append({
+                    "_id": str(doc.get("_id", "")),
+                    "reply_id": doc.get("reply_id", str(doc.get("_id", ""))),
+                    "reference_message_id": doc.get("reference_message_id", ""),
+                    "recipient": doc.get("recipient") or doc.get("to") or doc.get("phone_number") or "Unknown",
+                    "reply_text": doc.get("reply_text") or doc.get("message") or doc.get("text") or "",
+                    "status": doc.get("status", "SENT"),
+                    "timestamp": doc.get("timestamp") or (doc.get("created_at").isoformat() if doc.get("created_at") else "")
+                })
 
             return {
                 "source": "mongodb",
-                "incoming": incoming,
-                "outgoing": outgoing
+                "incoming": formatted_incoming,
+                "outgoing": formatted_outgoing,
+                "total_incoming": len(formatted_incoming),
+                "total_outgoing": len(formatted_outgoing)
             }
         except Exception as e:
-            log(f"[MONGODB READ ERROR] {e}")
+            log(f"[MONGODB READ ERROR] {e}. Falling back to CSV.")
 
-    return {"source": "none", "incoming": [], "outgoing": []}
+    # CSV Fallback: Return all records if MongoDB is not accessible
+    inc_list = []
+    out_list = []
+
+    if os.path.exists(INCOMING_CSV):
+        with open(INCOMING_CSV, "r", encoding="utf-8") as f:
+            inc_list = list(csv.DictReader(f))[::-1]
+
+    if os.path.exists(REPLIES_CSV):
+        with open(REPLIES_CSV, "r", encoding="utf-8") as f:
+            out_list = list(csv.DictReader(f))[::-1]
+
+    return {
+        "source": "csv_fallback",
+        "incoming": [
+            {
+                "_id": r.get("Message_ID", ""),
+                "message_id": r.get("Message_ID", ""),
+                "timestamp": r.get("Timestamp", ""),
+                "sender": r.get("Sender", ""),
+                "query": r.get("Query", ""),
+                "location": "Unspecified"
+            } for r in inc_list
+        ],
+        "outgoing": [
+            {
+                "_id": r.get("Reply_ID", ""),
+                "reply_id": r.get("Reply_ID", ""),
+                "reference_message_id": r.get("Reference_Message_ID", ""),
+                "timestamp": r.get("Timestamp", ""),
+                "recipient": r.get("Recipient", ""),
+                "reply_text": r.get("Reply_Text", ""),
+                "status": r.get("Status", "SENT")
+            } for r in out_list
+        ],
+        "total_incoming": len(inc_list),
+        "total_outgoing": len(out_list)
+    }
 
 
 if __name__ == "__main__":
