@@ -177,9 +177,6 @@ def send_sms_via_gateway(recipient: str, message: str) -> bool:
         }
     }
 
-    # Only include deviceId if populated
-    if DEVICE_ID:
-        payload["deviceId"] = DEVICE_ID
 
     try:
         log(f"[GATEWAY] Sending outbound SMS to {recipient} ({len(message)} chars)...")
