@@ -2,90 +2,193 @@ import os
 import csv
 import re
 import uuid
+import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, BackgroundTasks
 import uvicorn
-from google import genai
+from pymongo import MongoClient
+from pymongo.errors import PyMongoError
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+
+app = FastAPI(title="Offline Disaster SMS Gemini Gateway with MongoDB")
+
+# Enable CORS for React
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins for local Vite & deployed URLs
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class BroadcastRequest(BaseModel):
+    recipient: str
+    message: str
+
+@app.post("/api/broadcast")
+async def send_manual_broadcast(item: BroadcastRequest):
+    """Allows responders to manually dispatch emergency SMS directly from the dashboard."""
+    reply_id = f"REP_{uuid.uuid4().hex[:8].upper()}"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    success = send_sms_via_gateway(item.recipient, item.message)
+    status_label = "SENT" if success else "FAILED"
+    
+    log_outgoing_reply(reply_id, "MANUAL_BROADCAST", timestamp, item.recipient, item.message, status_label)
+    
+    return {"status": status_label, "reply_id": reply_id}
 
 # ----------------- Configuration & Env Setup -----------------
-# Load environment variables from .env file
-load_dotenv()
+env_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY").strip().strip("'").strip('"')
 GATEWAY_USERNAME = os.getenv("GATEWAY_USERNAME", "WSBOOB")
 GATEWAY_PASSWORD = os.getenv("GATEWAY_PASSWORD", "6zj_aqgr_wthfy")
 DEVICE_ID = os.getenv("DEVICE_ID", "2x9j6oWbTb46UJwgX1_KA")
 GATEWAY_API_URL = "https://api.sms-gate.app/3rdparty/v1/messages"
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY environment variable is not set. Please add it to your .env file or environment.")
+# ----------------- MongoDB Initialization -----------------
+try:
+    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=4000)
+    db = mongo_client["resq_net_db"]
+    incoming_col = db["incoming_messages"]
+    outgoing_col = db["outgoing_replies"]
 
-# Initialize Client globally using the environment variable
-client = genai.Client(api_key=GEMINI_API_KEY)
+    # Test connection
+    mongo_client.admin.command("ping")
+    print("[*] MongoDB successfully connected.")
+except Exception as e:
+    print(f"[!] Warning: MongoDB connection failed: {e}. Falling back to CSV only.")
+    incoming_col = None
+    outgoing_col = None
 
-app = FastAPI(title="Offline Disaster SMS Gemini Gateway")
 
 INCOMING_CSV = "incoming_sms.csv"
 REPLIES_CSV = "outgoing_replies.csv"
 
-# ----------------- CSV Initialization -----------------
-if not os.path.exists(INCOMING_CSV):
-    with open(INCOMING_CSV, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Message_ID", "Timestamp", "Sender", "Query"])
+# Cache recently processed message IDs (gateway messageId -> timestamp)
+PROCESSED_MESSAGE_IDS = {}
 
-if not os.path.exists(REPLIES_CSV):
-    with open(REPLIES_CSV, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Reply_ID", "Reference_Message_ID", "Timestamp", "Recipient", "Reply_Text", "Status"])
+# ----------------- CSV Initialization -----------------
+for filename, headers in [
+    (INCOMING_CSV, ["Message_ID", "Timestamp", "Sender", "Location", "Query"]),
+    (REPLIES_CSV, ["Reply_ID", "Reference_Message_ID", "Timestamp", "Recipient", "Reply_Text", "Status"])
+]:
+    if not os.path.exists(filename):
+        with open(filename, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
 
 
 # ----------------- Helper Functions -----------------
 def is_valid_mobile_number(number: str) -> bool:
-    """Ignore alphanumeric service/operator sender tags (e.g. AA-AIRTEL-S)."""
     clean = re.sub(r"[\s\-\(\)\+]", "", str(number))
     return clean.isdigit() and len(clean) >= 7
 
 
-def log_incoming_message(msg_id: str, timestamp: str, sender: str, query: str):
-    """Saves incoming query record to incoming_sms.csv."""
+def extract_location(text: str) -> str:
+    gps_match = re.search(r"(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)", text)
+    if gps_match:
+        return f"{gps_match.group(1)},{gps_match.group(2)}"
+    tag_match = re.search(r"(?:LOC|LOCATION|AT|NEAR)\s*[:\-]?\s*([a-zA-Z0-9\s]+?)(?:[,\.\-]|(?:\s+(?:need|help|water|food|stuck|is)))", text, re.IGNORECASE)
+    if tag_match:
+        return tag_match.group(1).strip()
+    return "Unspecified"
+
+
+def log_incoming_message(msg_id: str, timestamp: str, sender: str, location: str, query: str):
+    """Logs incoming message to CSV and MongoDB."""
+    # 1. CSV Backup
     with open(INCOMING_CSV, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow([msg_id, timestamp, sender, query])
+        writer.writerow([msg_id, timestamp, sender, location, query])
+
+    # 2. MongoDB Document
+    if incoming_col is not None:
+        try:
+            doc = {
+                "_id": msg_id,
+                "message_id": msg_id,
+                "timestamp": timestamp,
+                "sender": sender,
+                "location": location,
+                "query": query,
+                "created_at": datetime.now(timezone.utc)
+            }
+            incoming_col.insert_one(doc)
+            print(f"[MONGODB] Inserted incoming message {msg_id}")
+        except PyMongoError as pe:
+            print(f"[MONGODB ERROR] Failed to save incoming message: {pe}")
 
 
 def log_outgoing_reply(reply_id: str, ref_msg_id: str, timestamp: str, recipient: str, reply: str, status: str):
-    """Saves outbound reply record to outgoing_replies.csv."""
+    """Logs outbound reply to CSV and MongoDB."""
+    # 1. CSV Backup
     with open(REPLIES_CSV, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([reply_id, ref_msg_id, timestamp, recipient, reply, status])
 
+    # 2. MongoDB Document
+    if outgoing_col is not None:
+        try:
+            doc = {
+                "_id": reply_id,
+                "reply_id": reply_id,
+                "reference_message_id": ref_msg_id,
+                "timestamp": timestamp,
+                "recipient": recipient,
+                "reply_text": reply,
+                "status": status,
+                "created_at": datetime.now(timezone.utc)
+            }
+            outgoing_col.insert_one(doc)
+            print(f"[MONGODB] Inserted outgoing reply {reply_id}")
+        except PyMongoError as pe:
+            print(f"[MONGODB ERROR] Failed to save outgoing reply: {pe}")
 
-def ask_gemini(user_prompt: str) -> str:
-    """Queries Gemini using client.interactions.create with SMS formatting constraints."""
+
+def ask_gemini(user_prompt: str, location: str = "Unspecified") -> str:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    
     system_instruction = (
-        "your are an multipurpose assistant that also tells weather. so answer the queries in short"
+        "You are an offline emergency disaster assistant. Provide a direct, concise, factual answer. "
+        "No markdown, bullets, or asterisks. Maximum 200 characters."
     )
-    formatted_input = f"{system_instruction}\n\nUser Question: {user_prompt}"
+    formatted_input = (
+        f"{system_instruction}\n\n"
+        f"Sender Location Context: {location}\n"
+        f"User Query: {user_prompt}"
+    )
+
+    payload = {
+        "contents": [{"parts": [{"text": formatted_input}]}]
+    }
 
     try:
-        # Reuses the globally configured client
-        interaction = client.interactions.create(
-            model="gemini-2.5-flash",
-            input=formatted_input
-        )
-        output = interaction.output_text
-        return output
+        res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            candidates = data.get("candidates", [])
+            if candidates:
+                text = candidates[0]["content"]["parts"][0]["text"]
+                return text.replace("*", "").replace("#", "").strip()[:240]
+        else:
+            print(f"[GEMINI REST ERROR] HTTP {res.status_code}: {res.text}")
     except Exception as exc:
-        print(f"[GEMINI ERROR] {exc}")
-        return "ResQ-Net: Unable to fetch AI response right now."
+        print(f"[GEMINI EXCEPTION] {exc}")
+
+    loc_str = f" in {location}" if location != "Unspecified" else ""
+    return f"ResQ-Net: Seek elevated solid shelter{loc_str}. Disconnect main power grid. Conserve phone battery."
 
 
 def send_sms_via_gateway(recipient: str, message: str) -> bool:
-    """Dispatches outbound SMS back to recipient via SMS Gate Cloud API."""
     auth = (GATEWAY_USERNAME, GATEWAY_PASSWORD)
     payload = {
         "deviceId": DEVICE_ID,
@@ -105,12 +208,32 @@ def send_sms_via_gateway(recipient: str, message: str) -> bool:
         return False
 
 
+def process_query_in_background(message_id: str, sender: str, query: str, location: str):
+    clean_prompt = query
+    if clean_prompt.upper().startswith("ENET"):
+        clean_prompt = clean_prompt[4:].strip()
+    if not clean_prompt:
+        clean_prompt = "Emergency assistance needed"
+
+    print(f"\n[BACKGROUND PROCESSING] Query: '{clean_prompt}' | Loc: '{location}'")
+    ai_answer = ask_gemini(clean_prompt, location)
+    print(f"[AI RESPONSE READY]: {ai_answer}")
+
+    reply_id = f"REP_{uuid.uuid4().hex[:8].upper()}"
+    sms_sent = send_sms_via_gateway(sender, ai_answer)
+    status_label = "SENT" if sms_sent else "FAILED"
+
+    reply_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_outgoing_reply(reply_id, message_id, reply_timestamp, sender, ai_answer, status_label)
+
+
 # ----------------- Webhook Route -----------------
 @app.post("/sms-webhook")
-async def receive_sms_webhook(request: Request):
+async def receive_sms_webhook(request: Request, background_tasks: BackgroundTasks):
     content_type = request.headers.get("content-type", "")
     sender = "Unknown"
     raw_query = ""
+    gateway_msg_id = ""
 
     if "application/json" in content_type:
         try:
@@ -127,6 +250,7 @@ async def receive_sms_webhook(request: Request):
             or payload.get("senderNumber")
             or "Unknown"
         )
+        gateway_msg_id = payload.get("messageId") or data.get("id") or ""
     else:
         form = await request.form()
         raw_query = form.get("Body") or form.get("message") or ""
@@ -134,42 +258,58 @@ async def receive_sms_webhook(request: Request):
 
     cleaned_query = str(raw_query).strip()
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 1. Deduplication Filter
+    now = time.time()
+    to_delete = [k for k, v in PROCESSED_MESSAGE_IDS.items() if now - v > 300]
+    for k in to_delete:
+        del PROCESSED_MESSAGE_IDS[k]
+
+    dedup_key = gateway_msg_id if gateway_msg_id else f"{sender}_{cleaned_query}"
+    if dedup_key in PROCESSED_MESSAGE_IDS:
+        print(f"[DUPLICATE BLOCKED] Ignored retry for {dedup_key}")
+        return {"status": "ignored", "reason": "duplicate_retry"}
+
+    PROCESSED_MESSAGE_IDS[dedup_key] = now
+
+    # 2. Extract Location & Log Incoming to CSV + MongoDB
+    detected_loc = extract_location(cleaned_query)
     message_id = f"MSG_{uuid.uuid4().hex[:8].upper()}"
+    log_incoming_message(message_id, timestamp, sender, detected_loc, cleaned_query)
+    print(f"\n[{message_id}] From: {sender} | Loc: {detected_loc} | Query: {cleaned_query}")
 
-    # 1. Log incoming SMS
-    log_incoming_message(message_id, timestamp, sender, cleaned_query)
-    print(f"\n[{message_id}] From: {sender} | Query: {cleaned_query}")
-
-    # 2. Skip auto-reply for non-numeric telecom/service IDs
+    # 3. Filter Operator Numbers
     if not is_valid_mobile_number(sender):
-        print(f"[SKIPPED AUTO-REPLY] Sender '{sender}' is not a mobile number.")
-        return {"status": "saved", "note": "Operator message ignored"}
+        print(f"[SKIPPED AUTO-REPLY] Sender '{sender}' is not a valid mobile number.")
+        return {"status": "saved", "note": "Operator SMS ignored"}
 
-    # 3. Strip optional keyword prefix
-    clean_prompt = cleaned_query
-    if clean_prompt.upper().startswith("ENET"):
-        clean_prompt = clean_prompt[4:].strip()
-    if not clean_prompt:
-        clean_prompt = "Hello"
+    # 4. Immediate HTTP 200 + Background Execution
+    background_tasks.add_task(process_query_in_background, message_id, sender, cleaned_query, detected_loc)
 
-    # 4. Fetch Gemini Answer
-    ai_answer = ask_gemini(clean_prompt)
-    print(f"[AI RESPONSE]: {ai_answer}")
+    return {"status": "accepted", "message_id": message_id}
 
-    # 5. Dispatch SMS back to sender
-    reply_id = f"REP_{uuid.uuid4().hex[:8].upper()}"
-    sms_sent = send_sms_via_gateway(sender, ai_answer)
-    status_label = "SENT" if sms_sent else "FAILED"
 
-    # 6. Log reply to CSV
-    reply_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_outgoing_reply(reply_id, message_id, reply_timestamp, sender, ai_answer, status_label)
+# ----------------- MongoDB Query Endpoint -----------------
+@app.get("/api/messages")
+async def get_all_messages():
+    """Returns recent messages directly from MongoDB."""
+    if incoming_col is None:
+        return {"error": "MongoDB is not connected"}
+
+    incoming = list(incoming_col.find().sort("created_at", -1).limit(50))
+    outgoing = list(outgoing_col.find().sort("created_at", -1).limit(50))
+
+    # Convert BSON fields for JSON serialization
+    for doc in incoming + outgoing:
+        doc["_id"] = str(doc["_id"])
+        if "created_at" in doc and doc["created_at"]:
+            doc["created_at"] = doc["created_at"].isoformat()
 
     return {
-        "status": "success",
-        "message_id": message_id,
-        "reply_id": reply_id,
-        "sms_status": status_label
+        "incoming_count": len(incoming),
+        "outgoing_count": len(outgoing),
+        "incoming": incoming,
+        "outgoing": outgoing
     }
 
 
