@@ -97,7 +97,7 @@ def ask_gemini_with_fallback(user_query: str) -> str:
     client = genai.Client(api_key=GEMINI_API_KEY)
 
     interaction = client.interactions.create(
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         input=prompt
     )
     return interaction.output_text
