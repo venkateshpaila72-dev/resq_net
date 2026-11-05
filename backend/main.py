@@ -116,7 +116,7 @@ def call_groq(prompt: str) -> str:
         return ""
 
     system_instruction = (
-        "hey your are an helpul assistant . helper in emergence and if the situation is seveare then give the respected rescuse centers . each response should be points ."
+        "hey your are an helpul assistant . helper in emergence and if the situation is seveare then give the respected rescuse centers . each response should be points . withinn 200 characters."
     )
 
     messages = [
@@ -137,7 +137,7 @@ def call_groq(prompt: str) -> str:
         raw_text = message_obj.content or getattr(message_obj, "reasoning", "") or ""
         clean_text = raw_text.replace("*", "").replace("#", "").strip()
         log(f"[AI SUCCESS] Groq replied: {clean_text}")
-        return clean_text[]
+        return clean_text
 
     except Exception as exc:
         log(f"[AI ERROR] Groq call failed: {exc}")
