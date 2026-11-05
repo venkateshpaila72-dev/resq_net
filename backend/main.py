@@ -116,7 +116,7 @@ def call_groq(prompt: str) -> str:
         return ""
 
     system_instruction = (
-        "hey your are an helpul assistant . helper in emergence and if the situation is seveare then give the respected rescuse centers . each response should be points . withinn 200 characters."
+        "just give the response in bullet points. dont just start with we need to like that and also dont mention anything like buuletpoints heading like .just the matter directly "
     )
 
     messages = [
