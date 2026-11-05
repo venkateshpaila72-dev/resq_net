@@ -183,7 +183,7 @@ def call_groq(prompt: str, system: str = None, max_tokens: int = 150) -> str:
                 temperature=0.2
             )
             raw_text = response.choices[0].message.content.strip()
-            clean_text = raw_text.replace("*", "").replace("#", "").strip()
+            clean_text = raw_text
             log(f"[AI SUCCESS] Grok model '{model_name}' replied: {clean_text}")
             return clean_text[:160]
 
