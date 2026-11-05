@@ -200,7 +200,7 @@ def send_sms_via_gateway(recipient: str, message: str) -> bool:
     auth = (GATEWAY_USERNAME, GATEWAY_PASSWORD)
     
     # Ensure text is not empty or pure whitespace
-    body_text = str(message).strip() if message else ""
+    body_text = message
     if not body_text:
         body_text = "ResQ-Net: Emergency assistance acknowledged. Stay safe."
 
