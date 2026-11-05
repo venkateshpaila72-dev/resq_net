@@ -1,0 +1,36 @@
+Reply_ID,Reference_Message_ID,Timestamp,Recipient,Reply_Text,Status
+REP_93ADC4CB,MSG_7F30B67A,2026-11-05 19:14:50,+916300761716,Unable to process your request at this time. Please try again later.,SENT
+REP_914B0BAC,MSG_79B92D32,2026-11-05 19:14:59,AA-AIRTEL-S,Unable to process your request at this time. Please try again later.,FAILED
+REP_FAA6BC5A,MSG_60261723,2026-11-05 19:18:23,+916300761716,Unable to process query via AI right now.,SENT
+REP_41523A50,MSG_69E5E1FB,2026-11-05 19:24:32,+916300761716,Unable to process query via AI right now.,SENT
+REP_4B4E0142,MSG_B28D9EE9,2026-11-05 19:27:13,+916300761716,Unable to process query via AI right now.,SENT
+REP_A0627A3E,MSG_50755E00,2026-11-05 19:33:14,+916300761716,ResQ-Net: Unable to fetch AI response right now.,SENT
+REP_A2560ED1,MSG_971173C0,2026-11-05 19:37:26,+916300761716,ResQ-Net: Unable to fetch AI response right now.,SENT
+REP_7DF66590,MSG_469639D0,2026-11-05 19:41:26,+916300761716,ResQ-Net: Unable to fetch AI response right now.,SENT
+REP_9751B601,MSG_1EC0C3BB,2026-11-05 19:45:21,+916300761716,ResQ-Net: Unable to fetch AI response right now.,SENT
+REP_93972F72,MSG_6A1B4C34,2026-11-05 19:48:14,+916300761716,ResQ-Net: Unable to fetch AI response right now.,SENT
+REP_1C345FCE,MSG_B92E44C1,2026-11-05 19:50:27,+916300761716,ResQ-Net: Unable to fetch AI response right now.,SENT
+REP_73292F66,MSG_F402E5BE,2026-11-05 19:52:13,+916300761716,ResQ-Net: Unable to fetch AI response right now.,SENT
+REP_95CFEBFC,MSG_07596815,2026-11-05 19:54:46,+916300761716,ResQ-Net: Unable to fetch AI response right now.,SENT
+REP_FA841B4D,MSG_9210726A,2026-11-05 19:57:08,+916300761716,"I am an offline SMS disaster assistant. Send HELP for emergency info or keywords for specific aid (e.g., WATER, MEDICAL). Include location if possible. Keep messages brief. Stay safe.",SENT
+REP_38ECFA64,MSG_54FAAE23,2026-11-05 19:57:19,+916300761716,"Disaster Assist. Please describe your emergency, location, and immediate needs. We are an offline SMS service. Keep messages brief.",SENT
+REP_90091DF4,MSG_B2C547F9,2026-11-05 19:58:07,+916300761716,SMS Disaster Assistant here. How can I help you?,SENT
+REP_1C6E80D5,MSG_4C2A362C,2026-11-05 19:58:23,+916300761716,This is SMS disaster support. Send your location and specific urgent needs.,SENT
+REP_6B66BAEC,MSG_BA49E477,2026-11-05 19:59:31,+916300761716,Offline SMS disaster assistant. Send your specific disaster-related query.,SENT
+REP_4EC5A0CA,MSG_6FCE77C0,2026-11-05 19:59:41,+916300761716,"Offline SMS systems cannot provide live Vizag weather or cyclone alerts. Please check official local channels, radio, or TV for real-time updates.",SENT
+REP_0D2BD72C,MSG_30A9813C,2026-11-05 19:59:50,+916300761716,"As an offline system, I cannot provide live weather or cyclone alerts for Vizag. Monitor local emergency radio/TV or official disaster management channels for current information. Stay safe.",SENT
+REP_3690C408,MSG_727D4DF1,2026-11-05 20:00:01,+916300761716,"As an offline SMS assistant, I cannot provide real-time weather or cyclone alerts. Please check local emergency broadcasts or official channels for current information.",SENT
+REP_1115934F,MSG_7A36D1D6,2026-11-05 20:04:03,+916300761716,"Currently, Vizag is **28°C and partly cloudy**.
+
+No **cyclone alerts** are issued for Vizag or the Andhra Pradesh coast at this time.",SENT
+REP_56F2DD9C,MSG_E8DF40C0,2026-11-05 20:04:12,+916300761716,Hey there! What's up? Need a weather update?,SENT
+REP_02E89FED,MSG_D1B782FE,2026-11-05 20:04:25,+917569810408,"For current weather in Vizag, please check a real-time weather app or website for the most accurate conditions.",SENT
+REP_25681C1E,MSG_6DD4F2E2,2026-11-05 20:04:33,+917569810408,"Currently in Vizag, it's around **30°C and mostly clear/partly cloudy**.",SENT
+REP_DE6F072E,MSG_3365258A,2026-11-05 20:04:41,+917569810408,"Currently, it's partly cloudy in Visakhapatnam (Vizag) with a temperature of around 30°C.",SENT
+REP_2537033F,MSG_720B9F49,2026-11-05 20:04:48,+916300761716,"Vizag Weather:
+*   **Temperature:** Around 30°C
+*   **Conditions:** Partly cloudy, high humidity.
+*   **Cyclone Alerts:** No cyclone alerts currently for Vizag.",SENT
+REP_0E3A63FD,MSG_1743D69A,2026-11-05 20:05:05,+917569810408,It's **29°C and partly cloudy** in Vizag.,SENT
+REP_D0FFE0CA,MSG_F4EE565B,2026-11-05 20:26:25,+917569810408,"Basmati rice, chicken/mutton/vegetables, yogurt, onions, tomatoes, ginger-garlic paste, ghee, extensive spices (garam masala, turmeric, chili, cumin, coriander), mint, cilantro, saffron, salt.",SENT
+REP_B75548AF,MSG_B285B507,2026-11-05 20:30:10,+917569835837,ResQ-Net: Unable to fetch AI response right now.,SENT
