@@ -40,8 +40,8 @@ export default function ResQNetDashboard() {
   const [lastSync, setLastSync] = useState(new Date().toLocaleTimeString());
   const [copied, setCopied] = useState(false);
 
-  const queryPhoneNumber = "+917386597706";
-  const displayPhoneNumber = "+91 73865 97706";
+  const queryPhoneNumber = "+917569810408";
+  const displayPhoneNumber = "+91 75698 10408";
 
   const fetchMessages = async () => {
     try {
