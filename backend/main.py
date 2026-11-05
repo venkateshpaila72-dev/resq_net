@@ -24,9 +24,11 @@ def log(msg: str):
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip().strip("'").strip('"')
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
-GATEWAY_USERNAME = os.getenv("GATEWAY_USERNAME", "WSBOOB")
-GATEWAY_PASSWORD = os.getenv("GATEWAY_PASSWORD", "6zj_aqgr_wthfy")
-DEVICE_ID = os.getenv("DEVICE_ID", "2x9j6oWbTb46UJwgX1_KA")
+
+# Active Gateway Credentials (OPPO CPH2455)
+GATEWAY_USERNAME = os.getenv("GATEWAY_USERNAME", "FMSKCJ")
+GATEWAY_PASSWORD = os.getenv("GATEWAY_PASSWORD", "nu2bydf8a8pnot")
+DEVICE_ID = os.getenv("DEVICE_ID", "Ye4TFeIA882xuZGrdos9k").strip()  # Capital 'I'
 GATEWAY_API_URL = "https://api.sms-gate.app/3rdparty/v1/messages"
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 
@@ -82,12 +84,10 @@ def is_valid_mobile_number(number: str) -> bool:
 
 def save_incoming(msg_id: str, sender: str, query: str):
     """Stores incoming record to MongoDB and CSV backup."""
-    # CSV Backup
     with open(INCOMING_CSV, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([msg_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), sender, query])
 
-    # MongoDB
     if incoming_col is not None:
         try:
             incoming_col.insert_one({
@@ -105,12 +105,10 @@ def save_incoming(msg_id: str, sender: str, query: str):
 
 def save_outgoing(reply_id: str, ref_msg_id: str, recipient: str, reply_text: str, status: str):
     """Stores outgoing reply record to MongoDB and CSV backup."""
-    # CSV Backup
     with open(REPLIES_CSV, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([reply_id, ref_msg_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), recipient, reply_text, status])
 
-    # MongoDB
     if outgoing_col is not None:
         try:
             outgoing_col.insert_one({
@@ -129,16 +127,15 @@ def save_outgoing(reply_id: str, ref_msg_id: str, recipient: str, reply_text: st
 
 
 def call_groq(prompt: str) -> str:
-    """Sends prompt directly to Groq model without hardcoded fallbacks."""
+    """Sends prompt directly to Groq model."""
     if groq_client is None:
         log("[AI ERROR] Groq client not initialized.")
         return ""
 
     system_instruction = (
-        "You are an emergency disaster response and evacuation specialist. "
+        "You are an emergency response and disaster management assistant. "
         "Answer the query directly, factually, and concisely in clear actionable bullet points starting with '- '. "
-        "Do not include introductory words, conversational filler, headings, or emojis. "
-        "If severe, provide designated rescue locations and hospital directions."
+        "Do not include introductory words, conversational filler, headings, or emojis."
     )
 
     messages = [
@@ -174,13 +171,15 @@ def send_sms_via_gateway(recipient: str, message: str) -> bool:
 
     auth = (GATEWAY_USERNAME, GATEWAY_PASSWORD)
     payload = {
-        "deviceId": DEVICE_ID,
         "phoneNumbers": [str(recipient).strip()],
         "textMessage": {
-            "text": message,
-            "Text": message
+            "text": message
         }
     }
+
+    # Only include deviceId if populated
+    if DEVICE_ID:
+        payload["deviceId"] = DEVICE_ID
 
     try:
         log(f"[GATEWAY] Sending outbound SMS to {recipient} ({len(message)} chars)...")
@@ -208,7 +207,7 @@ def process_query_in_background(message_id: str, sender: str, prompt: str):
         log(f"\n==========================================")
         log(f"[PIPELINE START] ID: {message_id} | Sender: {sender} | Prompt: '{prompt}'")
 
-        # 1. Ask Groq
+        # 1. Groq inference
         ai_answer = call_groq(prompt)
 
         # 2. Dispatch SMS
@@ -218,7 +217,7 @@ def process_query_in_background(message_id: str, sender: str, prompt: str):
             sms_sent = send_sms_via_gateway(sender, ai_answer)
         status_label = "SENT" if sms_sent else "FAILED"
 
-        # 3. Log to MongoDB
+        # 3. Save Outgoing Log
         save_outgoing(reply_id, message_id, sender, ai_answer, status_label)
         log(f"[PIPELINE COMPLETE] Task {message_id} finished with status: {status_label}")
         log(f"==========================================\n")
@@ -266,27 +265,22 @@ async def receive_sms_webhook(request: Request, background_tasks: BackgroundTask
 
     cleaned_query = str(raw_query).strip()
 
-    # Filter out telecommunication carrier notices
     if not is_valid_mobile_number(sender):
         log(f"[SKIPPED AUTO-REPLY] Sender '{sender}' is not a mobile number.")
         return {"status": "saved", "note": "Operator message ignored"}
 
-    # STRICT CHECK: Message MUST start with ENET (case-insensitive)
+    # STRICT CHECK: Message MUST start with ENET
     if not re.match(r"^ENET\b", cleaned_query, flags=re.IGNORECASE):
         log(f"[SKIPPED] Message does not start with 'ENET': '{cleaned_query}'")
         return {"status": "ignored", "reason": "Message does not start with ENET"}
 
-    # Strip the leading ENET keyword
     clean_prompt = re.sub(r"^ENET\s*", "", cleaned_query, flags=re.IGNORECASE).strip()
 
-    # Save to MongoDB
     message_id = f"MSG_{uuid.uuid4().hex[:8].upper()}"
     save_incoming(message_id, sender, cleaned_query)
     log(f"\n[{message_id}] Received from: {sender} | Prompt: {clean_prompt}")
 
-    # Offload query & SMS dispatch to background task
     background_tasks.add_task(process_query_in_background, message_id, sender, clean_prompt)
-
     return {"status": "accepted", "message_id": message_id}
 
 
@@ -312,7 +306,6 @@ async def get_all_messages():
     """Returns ALL records from MongoDB without pagination/limits."""
     if incoming_col is not None and outgoing_col is not None:
         try:
-            # Query all documents, sorted newest first (no .limit)
             raw_incoming = list(incoming_col.find().sort("created_at", -1))
             raw_outgoing = list(outgoing_col.find().sort("created_at", -1))
 
@@ -350,7 +343,7 @@ async def get_all_messages():
         except Exception as e:
             log(f"[MONGODB READ ERROR] {e}. Falling back to CSV.")
 
-    # CSV Fallback: Return all records if MongoDB is not accessible
+    # CSV Fallback
     inc_list = []
     out_list = []
 
