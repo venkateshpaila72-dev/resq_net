@@ -23,14 +23,14 @@ def log(msg: str):
     print(msg, flush=True)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip().strip("'").strip('"')
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
 GATEWAY_USERNAME = os.getenv("GATEWAY_USERNAME", "WSBOOB")
 GATEWAY_PASSWORD = os.getenv("GATEWAY_PASSWORD", "6zj_aqgr_wthfy")
 DEVICE_ID = os.getenv("DEVICE_ID", "2x9j6oWbTb46UJwgX1_KA")
 GATEWAY_API_URL = "https://api.sms-gate.app/3rdparty/v1/messages"
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 
-# Groq models cascade in case of rate limits
+# Active Groq models list (avoids reasoning-only token-burn models)
 GROQ_MODELS = [
     GROQ_MODEL,
     "llama-3.3-70b-versatile",
@@ -76,7 +76,7 @@ except Exception as e:
     incoming_col = None
     outgoing_col = None
 
-# ----------------- CSV Persistence Fallback -----------------
+# ----------------- CSV Fallback Persistence -----------------
 INCOMING_CSV = "incoming_sms.csv"
 REPLIES_CSV = "outgoing_replies.csv"
 
@@ -142,23 +142,25 @@ def save_outgoing(reply_id: str, ref_msg_id: str, timestamp: str, recipient: str
 
 
 def get_emergency_failsafe(query: str) -> str:
-    """Local offline first-aid protocol when external API is unreachable."""
+    """Deterministic local first-aid protocol when external API is unreachable."""
     q = query.lower()
     if any(k in q for k in ["gas", "leak", "chemical", "styrene", "fumes"]):
-        return "ResQ-Net Gas Alert: Move crosswind/upwind immediately! Cover mouth with wet cloth. Evacuate 3-5km toward NH16 or high ground. Avoid low valleys."
+        return "ResQ-Net Gas Alert: Evacuate upwind/crosswind! Cover nose with wet cloth. Move 3-5km toward NH16/high ground. Avoid basements and low areas."
     if any(k in q for k in ["fire", "smoke", "flame", "burning"]):
-        return "ResQ-Net: Evacuate immediately! Crawl low under smoke. Feel doors before opening. Once out, call 101/112."
+        return "ResQ-Net: Evacuate immediately! Crawl low under smoke. Feel doors before opening. Once out, stay out and call 101/112."
     if any(k in q for k in ["burn", "blister", "cracker"]):
         return "ResQ-Net: Cool burn under running water 10-20 mins. Do not use ice, paste, or oil. Cover with clean cloth. Seek medical aid."
     if any(k in q for k in ["bleed", "cut", "wound"]):
         return "ResQ-Net: Apply firm, direct pressure with clean cloth. Elevate wound above heart level. Do not remove soaked cloth, add more on top."
     if any(k in q for k in ["flood", "drown", "water rising"]):
         return "ResQ-Net: Move to higher floor or solid ground. Disconnect main power grid. Avoid walking or driving in floodwaters."
+    if any(k in q for k in ["fracture", "broken bone"]):
+        return "ResQ-Net: Immobilize injured limb. Do not try to realign bone. Apply cold pack wrapped in cloth. Seek medical transport."
 
     return "ResQ-Net: Emergency assistance acknowledged. Stay in a safe, elevated location. Conserve battery. Help is being notified."
 
 
-def call_groq(prompt: str, system: str = None, max_tokens: int = 150) -> str:
+def call_groq(prompt: str, system: str = None, max_tokens: int = 250) -> str:
     """Call Groq API using the official Groq client with multi-model fallback."""
     if groq_client is None:
         log("[AI PIPELINE] Groq client unavailable. Using local failsafe.")
@@ -169,9 +171,9 @@ def call_groq(prompt: str, system: str = None, max_tokens: int = 150) -> str:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    # Deduplicate while preserving model fallback order
+    # Deduplicate while preserving model fallback priority
     seen = set()
-    models_to_try = [m for m in GROQ_MODELS if not (m in seen or seen.add(m))]
+    models_to_try = [m for m in GROQ_MODELS if m and not (m in seen or seen.add(m))]
 
     for model_name in models_to_try:
         try:
@@ -182,9 +184,18 @@ def call_groq(prompt: str, system: str = None, max_tokens: int = 150) -> str:
                 max_tokens=max_tokens,
                 temperature=0.2
             )
-            raw_text = response.choices[0].message.content
-            clean_text = raw_text
-            log(f"[AI SUCCESS] Grok model '{model_name}' replied: {clean_text}")
+            
+            message_obj = response.choices[0].message
+            # Extract content or fallback to reasoning field if present
+            raw_text = message_obj.content or getattr(message_obj, "reasoning", "") or ""
+            raw_text = raw_text.strip()
+
+            if not raw_text:
+                log(f"[AI WARNING] Model '{model_name}' returned empty content (finish_reason: {response.choices[0].finish_reason}). Trying next model...")
+                continue
+
+            clean_text = raw_text.replace("*", "").replace("#", "").strip()
+            log(f"[AI SUCCESS] Groq model '{model_name}' replied: {clean_text}")
             return clean_text[:160]
 
         except Exception as exc:
@@ -196,11 +207,10 @@ def call_groq(prompt: str, system: str = None, max_tokens: int = 150) -> str:
 
 
 def send_sms_via_gateway(recipient: str, message: str) -> bool:
-    """Dispatches outbound SMS back to recipient via SMS-Gate API."""
+    """Dispatches outbound SMS back to recipient via SMS-Gate API with verified textMessage structure."""
     auth = (GATEWAY_USERNAME, GATEWAY_PASSWORD)
     
-    # Ensure text is not empty or pure whitespace
-    body_text = message
+    body_text = str(message).strip() if message else ""
     if not body_text:
         body_text = "ResQ-Net: Emergency assistance acknowledged. Stay safe."
 
@@ -234,7 +244,7 @@ def send_sms_via_gateway(recipient: str, message: str) -> bool:
 
 
 def process_query_in_background(message_id: str, sender: str, raw_text: str):
-    """Background task: Parse -> Query Groq -> Send SMS -> Save logs."""
+    """Background task: Parse -> Query Groq -> Send SMS -> Save logs to MongoDB."""
     try:
         # Strip keyword 'ENET' (case-insensitive)
         clean_prompt = re.sub(r"^ENET\s*", "", raw_text, flags=re.IGNORECASE).strip()
@@ -245,14 +255,14 @@ def process_query_in_background(message_id: str, sender: str, raw_text: str):
         log(f"[PIPELINE START] ID: {message_id} | Sender: {sender} | Prompt: '{clean_prompt}'")
 
         system_instruction = (
-            "You are an offline disaster and first-aid SMS assistant. "
-            "Answer the query factually, concisely, and practically. "
+            "You are an emergency disaster evacuation and first-aid assistant. "
+            "Provide critical directions, safety actions, and clear instructions concisely. "
             "Strictly NO markdown, bold text, asterisks, bullet points, or emojis. "
-            "Keep the entire answer strictly under 150 characters for a single SMS message."
+            "Keep the entire answer strictly under 150 characters for a single cellular SMS."
         )
 
-        # 1. Ask Groq
-        ai_answer = call_groq(clean_prompt, system=system_instruction, max_tokens=120)
+        # 1. Ask Groq (max_tokens=250 allows full reasoning and completion)
+        ai_answer = call_groq(clean_prompt, system=system_instruction, max_tokens=250)
         log(f"[GROQ RESPONSE READY]: {ai_answer}")
 
         # 2. Dispatch SMS back to sender
