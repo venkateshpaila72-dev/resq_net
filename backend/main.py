@@ -12,7 +12,7 @@ from pydantic import BaseModel
 import uvicorn
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
-from openai import OpenAI
+from groq import Groq
 
 # ----------------- Environment Setup -----------------
 env_path = Path(__file__).resolve().parent / ".env"
@@ -22,32 +22,35 @@ def log(msg: str):
     """Ensure instant console output in terminals and Render logs."""
     print(msg, flush=True)
 
-GROK_API_KEY = os.getenv("GROK_API_KEY", "").strip().strip("'").strip('"')
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip().strip("'").strip('"')
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GATEWAY_USERNAME = os.getenv("GATEWAY_USERNAME", "WSBOOB")
 GATEWAY_PASSWORD = os.getenv("GATEWAY_PASSWORD", "6zj_aqgr_wthfy")
 DEVICE_ID = os.getenv("DEVICE_ID", "2x9j6oWbTb46UJwgX1_KA")
 GATEWAY_API_URL = "https://api.sms-gate.app/3rdparty/v1/messages"
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 
-# Active Grok models (waterfall fallback)
-GROK_MODELS = ["grok-2-mini", "grok-2", "grok-beta"]
+# Groq models cascade in case of rate limits
+GROQ_MODELS = [
+    GROQ_MODEL,
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "mixtral-8x7b-32768"
+]
 
-# Initialize xAI Client using official OpenAI compatible interface
-grok_client = None
-if GROK_API_KEY:
+# Initialize official Groq client
+groq_client = None
+if GROQ_API_KEY:
     try:
-        grok_client = OpenAI(
-            api_key=GROK_API_KEY,
-            base_url="https://api.x.ai/v1"
-        )
-        log("[*] xAI Grok Client initialized successfully.")
+        groq_client = Groq(api_key=GROQ_API_KEY)
+        log("[*] Groq client initialized successfully.")
     except Exception as e:
-        log(f"[!] Warning: Failed to initialize Grok client: {e}")
+        log(f"[!] Warning: Failed to initialize Groq client: {e}")
 else:
-    log("[!] Warning: GROK_API_KEY is not defined in .env.")
+    log("[!] Warning: GROQ_API_KEY is not defined in .env.")
 
 # ----------------- FastAPI & CORS -----------------
-app = FastAPI(title="ResQ-Net SMS & Grok AI Gateway")
+app = FastAPI(title="ResQ-Net SMS & Groq AI Gateway")
 
 app.add_middleware(
     CORSMiddleware,
@@ -139,8 +142,10 @@ def save_outgoing(reply_id: str, ref_msg_id: str, timestamp: str, recipient: str
 
 
 def get_emergency_failsafe(query: str) -> str:
-    """Local first-aid protocol when network or external API is down."""
+    """Local offline first-aid protocol when external API is unreachable."""
     q = query.lower()
+    if any(k in q for k in ["gas", "leak", "chemical", "styrene", "fumes"]):
+        return "ResQ-Net Gas Alert: Move crosswind/upwind immediately! Cover mouth with wet cloth. Evacuate 3-5km toward NH16 or high ground. Avoid low valleys."
     if any(k in q for k in ["fire", "smoke", "flame", "burning"]):
         return "ResQ-Net: Evacuate immediately! Crawl low under smoke. Feel doors before opening. Once out, call 101/112."
     if any(k in q for k in ["burn", "blister", "cracker"]):
@@ -149,48 +154,45 @@ def get_emergency_failsafe(query: str) -> str:
         return "ResQ-Net: Apply firm, direct pressure with clean cloth. Elevate wound above heart level. Do not remove soaked cloth, add more on top."
     if any(k in q for k in ["flood", "drown", "water rising"]):
         return "ResQ-Net: Move to higher floor or solid ground. Disconnect main power grid. Avoid walking or driving in floodwaters."
-    if any(k in q for k in ["fracture", "broken bone"]):
-        return "ResQ-Net: Immobilize injured limb. Do not try to realign bone. Apply cold pack wrapped in cloth. Seek medical transport."
 
     return "ResQ-Net: Emergency assistance acknowledged. Stay in a safe, elevated location. Conserve battery. Help is being notified."
 
 
-def ask_grok(user_prompt: str) -> str:
-    """Queries Grok through the OpenAI SDK interface."""
-    if grok_client is None:
-        log("[AI PIPELINE] Grok client unavailable. Using local failsafe.")
-        return get_emergency_failsafe(user_prompt)
+def call_groq(prompt: str, system: str = None, max_tokens: int = 150) -> str:
+    """Call Groq API using the official Groq client with multi-model fallback."""
+    if groq_client is None:
+        log("[AI PIPELINE] Groq client unavailable. Using local failsafe.")
+        return get_emergency_failsafe(prompt)
 
-    system_instruction = (
-        "You are an emergency disaster SMS assistant. Answer directly, concisely, and factually. "
-        "Do NOT use markdown, bold text, asterisks, bullet points, or emojis. "
-        "Keep the entire response under 150 characters so it fits in a single cellular SMS."
-    )
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
 
-    for model in GROK_MODELS:
+    # Deduplicate while preserving model fallback order
+    seen = set()
+    models_to_try = [m for m in GROQ_MODELS if not (m in seen or seen.add(m))]
+
+    for model_name in models_to_try:
         try:
-            log(f"[AI PIPELINE] Querying Grok model '{model}' with: '{user_prompt}'")
-            completion = grok_client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_instruction},
-                    {"role": "user", "content": user_prompt}
-                ],
-                max_tokens=80,
+            log(f"[AI PIPELINE] Querying Groq model '{model_name}' with: '{prompt}'")
+            response = groq_client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                max_tokens=max_tokens,
                 temperature=0.2
             )
-
-            raw_text = completion.choices[0].message.content
+            raw_text = response.choices[0].message.content.strip()
             clean_text = raw_text.replace("*", "").replace("#", "").strip()
-            log(f"[AI SUCCESS] Grok model '{model}' answered: {clean_text}")
+            log(f"[AI SUCCESS] Grok model '{model_name}' replied: {clean_text}")
             return clean_text[:160]
 
         except Exception as exc:
-            log(f"[AI WARNING] Grok model '{model}' failed: {exc}")
+            log(f"[AI WARNING] Groq model '{model_name}' failed: {exc}")
             continue
 
-    log("[AI FAILED] All Grok models failed. Using local emergency rule engine.")
-    return get_emergency_failsafe(user_prompt)
+    log("[AI FAILED] All Groq models failed. Using local rule engine.")
+    return get_emergency_failsafe(prompt)
 
 
 def send_sms_via_gateway(recipient: str, message: str) -> bool:
@@ -216,28 +218,33 @@ def send_sms_via_gateway(recipient: str, message: str) -> bool:
 
 
 def process_query_in_background(message_id: str, sender: str, raw_text: str):
-    """Background task: Parse -> Query Grok -> Send SMS -> Save logs."""
+    """Background task: Parse -> Query Groq -> Send SMS -> Save logs."""
     try:
-        clean_prompt = raw_text
-        if clean_prompt.upper().startswith("ENET"):
-            clean_prompt = clean_prompt[4:].strip()
-
+        # Strip keyword 'ENET' (case-insensitive)
+        clean_prompt = re.sub(r"^ENET\s*", "", raw_text, flags=re.IGNORECASE).strip()
         if not clean_prompt:
             clean_prompt = "Emergency assistance needed"
 
         log(f"\n==========================================")
         log(f"[PIPELINE START] ID: {message_id} | Sender: {sender} | Prompt: '{clean_prompt}'")
 
-        # 1. Ask Grok
-        ai_answer = ask_grok(clean_prompt)
-        log(f"[GROK RESPONSE READY]: {ai_answer}")
+        system_instruction = (
+            "You are an offline disaster and first-aid SMS assistant. "
+            "Answer the query factually, concisely, and practically. "
+            "Strictly NO markdown, bold text, asterisks, bullet points, or emojis. "
+            "Keep the entire answer strictly under 150 characters for a single SMS message."
+        )
 
-        # 2. Dispatch SMS
+        # 1. Ask Groq
+        ai_answer = call_groq(clean_prompt, system=system_instruction, max_tokens=120)
+        log(f"[GROQ RESPONSE READY]: {ai_answer}")
+
+        # 2. Dispatch SMS back to sender
         reply_id = f"REP_{uuid.uuid4().hex[:8].upper()}"
         sms_sent = send_sms_via_gateway(sender, ai_answer)
         status_label = "SENT" if sms_sent else "FAILED"
 
-        # 3. Save outgoing record to MongoDB & CSV
+        # 3. Log to MongoDB and CSV
         reply_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         save_outgoing(reply_id, message_id, reply_timestamp, sender, ai_answer, status_label)
         log(f"[PIPELINE COMPLETE] Task {message_id} finished with status: {status_label}")
@@ -251,10 +258,10 @@ def process_query_in_background(message_id: str, sender: str, raw_text: str):
 @app.head("/")
 async def root():
     return {
-        "service": "ResQ-Net SMS & Grok AI Gateway",
+        "service": "ResQ-Net SMS & Groq AI Gateway",
         "status": "online",
         "mongo_connected": incoming_col is not None,
-        "grok_client_ready": grok_client is not None
+        "groq_ready": groq_client is not None
     }
 
 
@@ -292,12 +299,18 @@ async def receive_sms_webhook(request: Request, background_tasks: BackgroundTask
         log(f"[SKIPPED AUTO-REPLY] Sender '{sender}' is not a mobile number.")
         return {"status": "saved", "note": "Operator message ignored"}
 
-    # Save incoming record to MongoDB & CSV
+    # Save all incoming messages for audit trail
     message_id = f"MSG_{uuid.uuid4().hex[:8].upper()}"
     save_incoming(message_id, timestamp, sender, cleaned_query)
-    log(f"\n[{message_id}] Received from: {sender} | Query: {cleaned_query}")
+    log(f"\n[{message_id}] Received from: {sender} | Raw Query: {cleaned_query}")
 
-    # Process Grok query and dispatch SMS asynchronously
+    # CHECK FOR 'ENET' KEYWORD
+    # Only process queries that start with or contain the keyword ENET
+    if not re.search(r"\bENET\b", cleaned_query, flags=re.IGNORECASE):
+        log(f"[SKIPPED AI PIPELINE] Message does not contain 'ENET' keyword. No auto-reply triggered.")
+        return {"status": "saved", "note": "Keyword ENET not found in message"}
+
+    # Process Groq query and dispatch SMS asynchronously
     background_tasks.add_task(process_query_in_background, message_id, sender, cleaned_query)
 
     return {"status": "accepted", "message_id": message_id}

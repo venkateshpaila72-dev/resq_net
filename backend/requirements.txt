@@ -5,4 +5,4 @@ requests>=2.31.0
 pymongo[srv]>=4.6.2
 pydantic>=2.6.4
 python-multipart>=0.0.9
-openai>=1.14.0
+groq>=0.9.0
