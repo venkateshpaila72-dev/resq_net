@@ -201,7 +201,9 @@ def send_sms_via_gateway(recipient: str, message: str) -> bool:
     payload = {
         "deviceId": DEVICE_ID,
         "phoneNumbers": [recipient],
-        "message": message
+        "textMessage": {
+            "text": message
+        }
     }
     try:
         log(f"[GATEWAY] Sending outbound SMS to {recipient}...")
