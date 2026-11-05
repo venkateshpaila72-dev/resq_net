@@ -26,9 +26,7 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
 });
 
-const API_BASE = window.location.hostname === 'localhost' 
-  ? 'http://localhost:8000' 
-  : 'https://resq-net-9akj.onrender.com';
+const API_BASE = 'https://resq-net-9akj.onrender.com';
 
 export default function ResQNetDashboard() {
   const [incoming, setIncoming] = useState([]);
