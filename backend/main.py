@@ -1,7 +1,6 @@
 import os
 import csv
 import re
-import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +18,7 @@ env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
 def log(msg: str):
-    """Ensure instant console output in terminals and Render logs."""
+    """Ensure instant console output in terminals and cloud logs."""
     print(msg, flush=True)
 
 GROK_API_KEY = os.getenv("GROK_API_KEY", "").strip().strip("'").strip('"')
@@ -31,13 +30,18 @@ MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 
 # Grok (xAI) API Configuration
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
-# Primary and fallback Grok models
-GROK_MODELS = ["grok-beta", "grok-2", "grok-2-mini"]
+# Sequential fallback list of Grok models
+GROK_MODELS = [
+    "grok-2-mini",
+    "grok-2",
+    "grok-beta",
+    "grok-4-1-fast-reasoning"
+]
 
 if GROK_API_KEY:
     log("[*] Grok (xAI) API key detected.")
 else:
-    log("[!] Warning: GROK_API_KEY is not defined in .env.")
+    log("[!] Warning: GROK_API_KEY is missing from environment or .env.")
 
 # ----------------- FastAPI & CORS -----------------
 app = FastAPI(title="ResQ-Net SMS & Grok AI Gateway")
@@ -66,7 +70,7 @@ except Exception as e:
     incoming_col = None
     outgoing_col = None
 
-# ----------------- CSV Persistence Fallback -----------------
+# ----------------- CSV Fallback Persistence -----------------
 INCOMING_CSV = "incoming_sms.csv"
 REPLIES_CSV = "outgoing_replies.csv"
 
@@ -82,13 +86,13 @@ for filename, headers in [
 
 # ----------------- Helper Functions -----------------
 def is_valid_mobile_number(number: str) -> bool:
-    """Filter out non-numeric service/operator IDs like AA-AIRTEL-S."""
+    """Filter out carrier and service notifications like AA-AIRTEL-S."""
     clean = re.sub(r"[\s\-\(\)\+]", "", str(number))
     return clean.isdigit() and len(clean) >= 7
 
 
 def save_incoming(msg_id: str, timestamp: str, sender: str, query: str):
-    """Stores incoming record to both CSV and MongoDB."""
+    """Saves incoming SMS to both CSV and MongoDB."""
     with open(INCOMING_CSV, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([msg_id, timestamp, sender, query])
@@ -109,7 +113,7 @@ def save_incoming(msg_id: str, timestamp: str, sender: str, query: str):
 
 
 def save_outgoing(reply_id: str, ref_msg_id: str, timestamp: str, recipient: str, reply_text: str, status: str):
-    """Stores outgoing reply record to both CSV and MongoDB."""
+    """Saves outgoing SMS reply to both CSV and MongoDB."""
     with open(REPLIES_CSV, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([reply_id, ref_msg_id, timestamp, recipient, reply_text, status])
@@ -132,7 +136,7 @@ def save_outgoing(reply_id: str, ref_msg_id: str, timestamp: str, recipient: str
 
 
 def get_emergency_failsafe(query: str) -> str:
-    """Offline first-aid fallback if API key or network is down."""
+    """Deterministic local first-aid engine if external API is down or key is invalid."""
     q = query.lower()
     if any(k in q for k in ["fire", "smoke", "flame", "burning"]):
         return "ResQ-Net: Evacuate immediately! Crawl low under smoke. Feel doors before opening. Once out, call 101/112."
@@ -149,14 +153,14 @@ def get_emergency_failsafe(query: str) -> str:
 
 
 def ask_grok(user_prompt: str) -> str:
-    """Sends query to xAI Grok API with SMS character constraints."""
+    """Calls xAI Grok API to generate an emergency SMS reply."""
     if not GROK_API_KEY:
         log("[AI PIPELINE] GROK_API_KEY missing. Using failsafe.")
         return get_emergency_failsafe(user_prompt)
 
     system_instruction = (
         "You are an offline emergency disaster SMS assistant. Answer the user query directly, concisely, and factually. "
-        "Do NOT use markdown, bold text, asterisks, bullet points, or emojis. "
+        "Do NOT use markdown formatting, bold text, asterisks, bullet points, or emojis. "
         "Keep the entire response under 150 characters so it fits in a single cellular SMS."
     )
 
@@ -184,7 +188,7 @@ def ask_grok(user_prompt: str) -> str:
                 data = res.json()
                 raw_text = data["choices"][0]["message"]["content"]
                 clean_text = raw_text.replace("*", "").replace("#", "").strip()
-                log(f"[AI SUCCESS] Grok model '{model}' replied.")
+                log(f"[AI SUCCESS] Grok model '{model}' generated response: {clean_text}")
                 return clean_text[:160]
             else:
                 log(f"[AI HTTP ERROR] Grok '{model}' returned HTTP {res.status_code}: {res.text}")
@@ -221,7 +225,7 @@ def send_sms_via_gateway(recipient: str, message: str) -> bool:
 
 
 def process_query_in_background(message_id: str, sender: str, raw_text: str):
-    """Background task: Parse -> Query Grok -> Dispatch SMS -> Save to MongoDB/CSV."""
+    """Background worker: cleans prompt -> queries Grok -> dispatches SMS -> saves to MongoDB."""
     try:
         clean_prompt = raw_text
         if clean_prompt.upper().startswith("ENET"):
@@ -233,9 +237,9 @@ def process_query_in_background(message_id: str, sender: str, raw_text: str):
         log(f"\n==========================================")
         log(f"[PIPELINE START] ID: {message_id} | Sender: {sender} | Prompt: '{clean_prompt}'")
 
-        # 1. Query Grok
+        # 1. Ask Grok
         ai_answer = ask_grok(clean_prompt)
-        log(f"[GROK RESPONSE READY]: {ai_answer}")
+        log(f"[AI RESPONSE READY]: {ai_answer}")
 
         # 2. Dispatch SMS
         reply_id = f"REP_{uuid.uuid4().hex[:8].upper()}"
@@ -292,12 +296,12 @@ async def receive_sms_webhook(request: Request, background_tasks: BackgroundTask
     cleaned_query = str(raw_query).strip()
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Filter out telecommunication carrier notices (Airtel, Vi, Jio)
+    # Filter out telecommunication carrier notices
     if not is_valid_mobile_number(sender):
         log(f"[SKIPPED AUTO-REPLY] Sender '{sender}' is not a mobile number.")
         return {"status": "saved", "note": "Operator message ignored"}
 
-    # Save incoming record to MongoDB and CSV
+    # Save incoming record
     message_id = f"MSG_{uuid.uuid4().hex[:8].upper()}"
     save_incoming(message_id, timestamp, sender, cleaned_query)
     log(f"\n[{message_id}] Received from: {sender} | Query: {cleaned_query}")
