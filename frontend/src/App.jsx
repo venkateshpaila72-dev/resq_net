@@ -192,7 +192,7 @@ export default function ResQNetDashboard() {
                   DEFCON-RELAY
                 </span>
               </div>
-              <p className="text-xs text-slate-400 font-mono">Cellular GSM Bridge &bull; Autonomous Groq AI Node</p>
+              <p className="text-xs text-slate-400 font-mono">Cellular GSM Bridge &bull; Autonomous Gemini AI Node</p>
             </div>
           </div>
 
@@ -283,7 +283,7 @@ export default function ResQNetDashboard() {
                 <strong className="text-rose-400">ENET</strong> what is the first aid for a severe burn?
               </code>
             </div>
-            <span className="text-slate-500 text-[10px]">&bull; Auto-triaged via Groq with sub-second latency</span>
+            <span className="text-slate-500 text-[10px]">&bull; Auto-triaged via Gemini with sub-second latency</span>
           </div>
         </div>
 
@@ -315,7 +315,7 @@ export default function ResQNetDashboard() {
               </div>
             </div>
             <div className="mt-3 flex items-center text-[11px] text-slate-400 font-mono">
-              <Activity className="w-3.5 h-3.5 mr-1 text-emerald-400" /> Groq LLM Grounded
+              <Activity className="w-3.5 h-3.5 mr-1 text-emerald-400" /> Gemini LLM Grounded
             </div>
           </div>
 
